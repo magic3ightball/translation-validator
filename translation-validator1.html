@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>번역 검수 프로그램</title>
+  
+  <!-- Tailwind CSS -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/tailwindcss/2.2.19/tailwind.min.js"></script>
+  
+  <!-- React 및 관련 라이브러리 -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.21.2/babel.min.js"></script>
+  
+  <!-- PapaParse (CSV 파싱) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+  
+  <!-- SheetJS (Excel 파싱) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  
+  <style>
+    /* 추가 스타일 */
+    .file-input-wrapper {
+      position: relative;
+      overflow: hidden;
+      display: inline-block;
+    }
+    .custom-file-input {
+      position: absolute;
+      font-size: 999px;
+      opacity: 0;
+      right: 0;
+      top: 0;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body class="bg-gray-100">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    // ValidationUtils 객체 정의
+    const ValidationUtils = {
+      // 1. 태그 검사 함수 - 태그 형태만 확인하고 내용은 검사하지 않음, 전각/반각 구분 없음
+      checkTags: (sourceText, translatedText) => {
+        sourceText = String(sourceText || "");
+        translatedText = String(translatedText || "");
+        
+        // 전각 문자를 반각 문자로 변환
+        const normalizeText = (text) => {
+          return text
+            .replace(/［/g, '[')
+            .replace(/］/g, ']')
+            .replace(/｛/g, '{')
+            .replace(/｝/g, '}')
+            .replace(/＜/g, '<')
+            .replace(/＞/g, '>')
+            .replace(/（/g, '(')
+            .replace(/）/g, ')')
+            .replace(/／/g, '/')
+            .replace(/：/g, ':');
+        };
+        
+        // 텍스트 정규화
+        const normalizedSource = normalizeText(sourceText);
+        const normalizedTranslated = normalizeText(translatedText);
+        
+        // 태그 형태만 추출하는 정규식
+        const tagPatterns = [
+          /\[.*?\]/g,   // [] 태그
+          /\{.*?\}/g,   // {} 태그
+          /<.*?>/g,     // <> 태그
+          /\(.*?\)/g,   // () 태그
+          /\/.*?\//g,   // // 태그
+          /\:.*?\:/g    // :: 태그
+        ];
+        
+        const issues = [];
+        
+        // 각 태그 패턴에 대해 개수 검사
+        tagPatterns.forEach((pattern, index) => {
+          const sourceTags = (normalizedSource.match(pattern) || []).length;
+          const translatedTags = (normalizedTranslated.match(pattern) || []).length;
+          
+          const tagTypes = ['대괄호 []', '중괄호 {}', '화살괄호 <>', '소괄호 ()', '슬래시 /', '콜론 :'];
+          
+          // 개수가 일치하지 않으면 오류 추가
+          if (sourceTags !== translatedTags) {
+            issues.push(`${tagTypes[index]} 태그 개수 불일치: 원문 ${sourceTags}개, 번역문 ${translatedTags}개`);
+          }
+        });
+        
+        return issues;
+      },
+
+      // 2. 개행 문자 검사 함수 - 문자열 형태의 개행문자만 검사
+      checkLineBreaks: (sourceText, translatedText) => {
+        sourceText = String(sourceText || "");
+        translatedText = String(translatedText || "");
+        
+        const issues = [];
+        
+        // "\\n" 문자열 검사 - 텍스트에 "\n"이라는 문자가 있는지 확인
+        // 문자열 "\n"은 정규식에서 /\\n/로 표현됨
+        const backslashN = (sourceText.match(/\\n/g) || []).length;
+        const translatedBackslashN = (translatedText.match(/\\n/g) || []).length;
+        
+        if (backslashN !== translatedBackslashN) {
+          issues.push(`\\n 개행 문자 불일치: 원문 ${backslashN}개, 번역문 ${translatedBackslashN}개`);
+        }
+        
+        // "₩n" 문자열 검사
+        const koreanN = (sourceText.match(/₩n/g) || []).length;
+        const translatedKoreanN = (translatedText.match(/₩n/g) || []).length;
+        
+        if (koreanN !== translatedKoreanN) {
+          issues.push(`₩n 개행 문자 불일치: 원문 ${koreanN}개, 번역문 ${translatedKoreanN}개`);
+        }
+        
+        return issues;
+      },
+
+      // 3. 숫자 검사 함수
+      checkNumbers: (sourceText, translatedText) => {
+        sourceText = String(sourceText || "");
+        translatedText = String(translatedText || "");
+        
+        // 숫자 추출 정규식 (쉼표, 소수점, % 포함)
+        const numberPattern = /\d+(?:,\d+)?(?:\.\d+)?%?/g;
+        
+        const sourceNumbers = Array.from(sourceText.matchAll(numberPattern), m => m[0]);
+        const translatedNumbers = Array.from(translatedText.matchAll(numberPattern), m => m[0]);
+        
+        const issues = [];
+        
+        // 소스에는 있지만 번역본에는 없는 숫자 찾기
+        sourceNumbers.forEach(num => {
+          if (!translatedNumbers.includes(num)) {
+            issues.push(`숫자 누락 또는 변경: ${num}`);
+          }
+        });
+        
+        return issues;
+      },
+
+      // 4. 더블 스페이스 검사 함수 (번역문에 연속된 공백이 있는지 확인)
+      checkDoubleSpaces: (text) => {
+        if (!text) return [];
+        
+        // 문자열 내에 두 개 이상의 공백이 연속해서 있는지 확인
+        for (let i = 0; i < text.length - 1; i++) {
+          if (text[i] === ' ' && text[i+1] === ' ') {
+            return ["연속된 공백(더블 스페이스)이 발견되었습니다"];
+          }
+        }
+        
+        return [];
+      },
+
+      // 전체 검사 함수
+      checkTranslation: (sourceText, translatedText) => {
+        const tagIssues = ValidationUtils.checkTags(sourceText, translatedText);
+        const lineBreakIssues = ValidationUtils.checkLineBreaks(sourceText, translatedText);
+        const numberIssues = ValidationUtils.checkNumbers(sourceText, translatedText);
+        const doubleSpaceIssues = ValidationUtils.checkDoubleSpaces(translatedText);
+        
+        return [
+          ...tagIssues, 
+          ...lineBreakIssues, 
+          ...numberIssues, 
+          ...doubleSpaceIssues
+        ];
+      }
+    };
+
+    // React 컴포넌트 정의
+    const TranslationValidator = () => {
+      const [data, setData] = React.useState([]);
+      const [validationResults, setValidationResults] = React.useState([]);
+      const [filteredResults, setFilteredResults] = React.useState([]);
+      const [loading, setLoading] = React.useState(false);
+      const [contentColumnIndex, setContentColumnIndex] = React.useState(0); // 원문은 1열(인덱스 0)로 고정
+      const [translationColumns, setTranslationColumns] = React.useState([]);
+      const [fileLoaded, setFileLoaded] = React.useState(false);
+      const [errorMsg, setErrorMsg] = React.useState("");
+      const [issueSummary, setIssueSummary] = React.useState({});
+      const [languageFilter, setLanguageFilter] = React.useState("all");
+      const [categoryFilter, setCategoryFilter] = React.useState("all");
+
+      // 컴포넌트 마운트 시 초기화
+      React.useEffect(() => {
+        // 필요한 초기화 작업이 있으면 여기에 추가
+      }, []);
+
+      // 필터 변경 시 필터링 적용
+      React.useEffect(() => {
+        if (validationResults.length > 0) {
+          applyFilters();
+        }
+      }, [languageFilter, categoryFilter, validationResults]);
+
+      // 필터 적용 함수
+      const applyFilters = () => {
+        let results = [...validationResults];
+        
+        // 언어 필터링
+        if (languageFilter !== "all") {
+          results = results.filter(result => result.column === languageFilter);
+        }
+        
+        // 카테고리 필터링
+        if (categoryFilter !== "all") {
+          results = results.filter(result => {
+            const issues = result.issues;
+            switch (categoryFilter) {
+              case "tag":
+                return issues.some(issue => issue.includes("태그"));
+              case "linebreak":
+                return issues.some(issue => issue.includes("\\n") || issue.includes("₩n"));
+              case "number":
+                return issues.some(issue => issue.includes("숫자"));
+              case "space":
+                return issues.some(issue => issue.includes("공백"));
+              default:
+                return true;
+            }
+          });
+        }
+        
+        setFilteredResults(results);
+      };
+
+      // 헤더 처리 함수 - 1행은 헤더, 1열은 원문
+      const processHeaders = (sheetData) => {
+        if (!sheetData || sheetData.length === 0) return;
+        
+        // 1행(인덱스 0)이 헤더
+        const headers = sheetData[0];
+        
+        // 1열(인덱스 0)은 원문으로 고정
+        setContentColumnIndex(0);
+        
+        // 2열(인덱스 1)부터 번역 언어 열로 인식
+        const translationCols = [];
+        headers.forEach((header, index) => {
+          if (index > 0 && header) {
+            translationCols.push({ index, name: header });
+          }
+        });
+        setTranslationColumns(translationCols);
+      };
+
+      // 데이터 검증 함수 - 2행부터 내용, 1열은 원문
+      const validateData = (sheetData) => {
+        if (!sheetData || sheetData.length <= 1) return;
+        
+        // 1열(인덱스 0)은 원문으로 고정
+        const contentColumn = 0;
+        
+        // 헤더 정보를 가져옴
+        const headers = sheetData[0];
+        
+        // 2열(인덱스 1)부터 번역 언어 열로 인식
+        const translationCols = [];
+        headers.forEach((header, index) => {
+          if (index > 0 && header) {
+            translationCols.push({ index, name: header });
+          }
+        });
+        
+        // 모든 번역에 대한 검증 실행
+        const results = [];
+        const summary = {};
+        
+        // 2행(인덱스 1)부터 내용 시작
+        for (let rowIndex = 1; rowIndex < sheetData.length; rowIndex++) {
+          const row = sheetData[rowIndex];
+          if (!row || row.length === 0) continue;
+          
+          const sourceText = row[contentColumn];
+          if (!sourceText) continue;
+          
+          // 각 번역 열에 대해 검증
+          translationCols.forEach(column => {
+            const translatedText = row[column.index];
+            if (!translatedText) {
+              results.push({
+                row: rowIndex + 1, // 실제 행 번호 (1부터 시작)
+                column: column.name,
+                source: sourceText,
+                translated: "(내용 없음)",
+                issues: ["번역 내용 없음"]
+              });
+              
+              summary[column.name] = (summary[column.name] || 0) + 1;
+              return;
+            }
+            
+            const issues = ValidationUtils.checkTranslation(sourceText, translatedText);
+            if (issues.length > 0) {
+              results.push({
+                row: rowIndex + 1, // 실제 행 번호 (1부터 시작)
+                column: column.name,
+                source: sourceText,
+                translated: translatedText,
+                issues
+              });
+              
+              summary[column.name] = (summary[column.name] || 0) + 1;
+            }
+          });
+        }
+        
+        setValidationResults(results);
+        setFilteredResults(results); // 초기에는 필터링 없이 모두 표시
+        setIssueSummary(summary);
+      };
+
+      // 파일 업로드 처리 함수
+      const handleFileUpload = (event) => {
+        const file = event.target.files[0];
+        if (!file) return;
+        
+        setLoading(true);
+        setErrorMsg("");
+        setValidationResults([]);
+        setFilteredResults([]);
+        setIssueSummary({});
+        setLanguageFilter("all");
+        setCategoryFilter("all");
+        
+        const reader = new FileReader();
+        
+        reader.onload = (e) => {
+          try {
+            const result = e.target.result;
+            
+            // CSV
+            if (file.type === "text/csv") {
+              Papa.parse(file, {
+                header: false,
+                dynamicTyping: false,
+                complete: function(results) {
+                  processHeaders(results.data);
+                  validateData(results.data);
+                  setData(results.data);
+                  setFileLoaded(true);
+                  setLoading(false);
+                },
+                error: function(error) {
+                  setErrorMsg("CSV 파일 파싱 오류: " + error.message);
+                  setLoading(false);
+                }
+              });
+            }
+            // Excel
+            else if (file.type === "application/vnd.ms-excel" || file.type === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet") {
+              const workbook = XLSX.read(result, { type: 'binary' });
+              const sheetName = workbook.SheetNames[0];
+              const sheet = workbook.Sheets[sheetName];
+              const excelData = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+              
+              processHeaders(excelData);
+              validateData(excelData);
+              setData(excelData);
+              setFileLoaded(true);
+              setLoading(false);
+            }
+            else {
+              setErrorMsg("잘못된 파일 형식입니다. CSV 또는 Excel 파일만 허용됩니다.");
+              setLoading(false);
+            }
+          } catch (e) {
+            setErrorMsg("파일 처리 중 오류가 발생했습니다: " + e.message);
+            setLoading(false);
+          }
+        };
+        
+        reader.onerror = () => {
+          setErrorMsg("파일 읽기 오류");
+          setLoading(false);
+        };
+        
+        reader.readAsBinaryString(file);
+      };
+
+      // 데이터 저장 함수 (미구현)
+      const saveData = () => {
+        alert("저장 기능은 아직 구현되지 않았습니다.");
+      };
+      
+      return (
+        React.createElement(
+          "div",
+          null,
+          React.createElement(
+            "div",
+            { className: "bg-blue-500 text-white p-4" },
+            React.createElement(
+              "h1",
+              { className: "text-2xl font-bold" },
+              "번역 검수 프로그램"
+            )
+          ),
+          React.createElement(
+            "div",
+            { className: "p-4" },
+            React.createElement(
+              "label",
+              { className: "block text-gray-700 text-sm font-bold mb-2" },
+              "파일 선택:"
+            ),
+            React.createElement("input", {
+              type: "file",
+              onChange: handleFileUpload,
+              className: "shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+            }),
+            errorMsg &&
+              React.createElement(
+                "div",
+                { className: "text-red-500 text-xs italic mt-2" },
+                errorMsg
+              ),
+            fileLoaded &&
+              React.createElement(
+                "div",
+                null,
+                React.createElement(
+                  "div",
+                  { className: "mb-4" },
+                  React.createElement(
+                    "label",
+                    { className: "block text-gray-700 text-sm font-bold mb-2" },
+                    "언어 필터:"
+                  ),
+                  React.createElement(
+                    "select",
+                    {
+                      value: languageFilter,
+                      onChange: (e) => setLanguageFilter(e.target.value),
+                      className: "shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+                    },
+                    React.createElement(
+                      "option",
+                      { value: "all" },
+                      "전체"
+                    ),
+                    translationColumns.map(col =>
+                      React.createElement(
+                        "option",
+                        { key: col.index, value: col.name },
+                        col.name
+                      )
+                    )
+                  ),
+                  React.createElement(
+                    "label",
+                    { className: "block text-gray-700 text-sm font-bold mt-4 mb-2" },
+                    "카테고리 필터:"
+                  ),
+                  React.createElement(
+                    "select",
+                    {
+                      value: categoryFilter,
+                      onChange: (e) => setCategoryFilter(e.target.value),
+                      className: "shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+                    },
+                    React.createElement(
+                      "option",
+                      { value: "all" },
+                      "전체"
+                    ),
+                    React.createElement(
+                      "option",
+                      { value: "tag" },
+                      "태그"
+                    ),
+                    React.createElement(
+                      "option",
+                      { value: "linebreak" },
+                      "개행 문자"
+                    ),
+                    React.createElement(
+                      "option",
+                      { value: "number" },
+                      "숫자"
+                    ),
+                    React.createElement(
+                      "option",
+                      { value: "space" },
+                      "공백"
+                    )
+                  )
+                ),
+                React.createElement(
+                  "div",
+                  { className: "mb-4" },
+                  React.createElement(
+                    "h2",
+                    { className: "text-lg font-semibold" },
+                    "총 이슈 수: ",
+                    Object.values(issueSummary).reduce((acc, val) => acc + val, 0)
+                  ),
+                  React.createElement(
+                    "div",
+                    null,
+                    Object.entries(issueSummary).map(([language, count]) =>
+                      React.createElement(
+                        "p",
+                        { key: language },
+                        language,
+                        ": ",
+                        count
+                      )
+                    )
+                  )
+                )
+              ),
+            loading ?
+              React.createElement(
+                "div",
+                { className: "text-center mt-4" },
+                "파일 로딩 중..."
+              )
+             :
+              React.createElement(
+                "div",
+                { className: "overflow-x-auto" },
+                React.createElement(
+                  "table",
+                  { className: "min-w-full leading-normal" },
+                  React.createElement(
+                    "thead",
+                    { className: "bg-gray-200 text-gray-600 uppercase text-sm" },
+                    React.createElement(
+                      "tr",
+                      null,
+                      React.createElement(
+                        "th",
+                        { className: "py-3 px-6 text-left" },
+                        "행"
+                      ),
+                      React.createElement(
+                        "th",
+                        { className: "py-3 px-6 text-left" },
+                        "열"
+                      ),
+                      React.createElement(
+                        "th",
+                        { className: "py-3 px-6 text-left" },
+                        "원문"
+                      ),
+                      React.createElement(
+                        "th",
+                        { className: "py-3 px-6 text-left" },
+                        "번역문"
+                      ),
+                      React.createElement(
+                        "th",
+                        { className: "py-3 px-6 text-left" },
+                        "이슈"
+                      )
+                    )
+                  ),
+                  React.createElement(
+                    "tbody",
+                    { className: "text-gray-600 text-sm" },
+                    filteredResults.map((result, index) =>
+                      React.createElement(
+                        "tr",
+                        { key: index, className: "border-b border-gray-200 hover:bg-gray-100" },
+                        React.createElement(
+                          "td",
+                          { className: "py-3 px-6 text-left" },
+                          result.row
+                        ),
+                        React.createElement(
+                          "td",
+                          { className: "py-3 px-6 text-left" },
+                          result.column
+                        ),
+                        React.createElement(
+                          "td",
+                          { className: "py-3 px-6 text-left" },
+                          result.source
+                        ),
+                        React.createElement(
+                          "td",
+                          { className: "py-3 px-6 text-left" },
+                          result.translated
+                        ),
+                        React.createElement(
+                          "td",
+                          { className: "py-3 px-6 text-left" },
+                          result.issues.map((issue, i) =>
+                            React.createElement(
+                              "p",
+                              { key: i },
+                              issue
+                            )
+                          )
+                        )
+                      )
+                    )
+                  )
+                )
+              )
+          )
+        )
+      );
+    };
+
+    // React 앱 렌더링
+    ReactDOM.render(React.createElement(TranslationValidator, null), document.getElementById('root'));
+  </script>
+</body>
+</html>
